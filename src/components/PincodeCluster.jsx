@@ -5,7 +5,14 @@ import "leaflet.markercluster/dist/MarkerCluster.css";
 import "leaflet.markercluster/dist/MarkerCluster.Default.css";
 import { useLeaflet } from "react-leaflet";
 
-const PincodeCluster = ({ geocodedData, getColor, getRadius, formatSales }) => {
+const PincodeCluster = ({
+  geocodedData,
+  getColor,
+  getRadius,
+  formatSales,
+  selectedPincode,
+  onSelect
+}) => {
   const { map } = useLeaflet();
   const markerClusterGroupRef = useRef(null);
 
@@ -64,6 +71,7 @@ const PincodeCluster = ({ geocodedData, getColor, getRadius, formatSales }) => {
       const radius = getRadius(item.sales);
       const salesText = formatSales(item.sales);
       const color = getColor(item.sales);
+      const isSelected = selectedPincode === item.pincode;
       
       // Create custom marker icon with better design
       const customIcon = L.divIcon({
@@ -77,7 +85,7 @@ const PincodeCluster = ({ geocodedData, getColor, getRadius, formatSales }) => {
             width: ${radius * 2}px;
             height: ${radius * 2}px;
           "></div>
-          <div class="sales-marker-circle" style="
+          <div class="sales-marker-circle ${isSelected ? "is-selected" : ""}" style="
             background: linear-gradient(135deg, ${color} 0%, ${adjustColor(color, -22)} 100%);
             width: ${radius * 2}px;
             height: ${radius * 2}px;
@@ -119,6 +127,12 @@ const PincodeCluster = ({ geocodedData, getColor, getRadius, formatSales }) => {
           </div>
         </div>`
       );
+
+      marker.on("click", () => {
+        if (onSelect) {
+          onSelect(item);
+        }
+      });
 
       markerClusterGroup.addLayer(marker);
     });
@@ -163,7 +177,7 @@ const PincodeCluster = ({ geocodedData, getColor, getRadius, formatSales }) => {
         map.removeLayer(markerClusterGroupRef.current);
       }
     };
-  }, [map, geocodedData, getColor, getRadius, formatSales]);
+  }, [map, geocodedData, getColor, getRadius, formatSales, selectedPincode, onSelect]);
 
   return null;
 };

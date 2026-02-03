@@ -18,14 +18,61 @@ const pincodeCoordinates = {
   "380002": [23.0225, 72.5714], // Ahmedabad
 };
 
+const memoryCache = new Map();
+const STORAGE_KEY = "pincodeCoordinateCache_v1";
+
+const readStorageCache = () => {
+  if (typeof window === "undefined") return {};
+  try {
+    const stored = window.localStorage.getItem(STORAGE_KEY);
+    return stored ? JSON.parse(stored) : {};
+  } catch (error) {
+    return {};
+  }
+};
+
+const writeStorageCache = (cache) => {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(cache));
+  } catch (error) {
+    // Ignore storage failures (quota / privacy mode)
+  }
+};
+
+const getCachedCoordinates = (pincode) => {
+  if (memoryCache.has(pincode)) {
+    return memoryCache.get(pincode);
+  }
+  const storageCache = readStorageCache();
+  if (storageCache[pincode]) {
+    memoryCache.set(pincode, storageCache[pincode]);
+    return storageCache[pincode];
+  }
+  return null;
+};
+
+const setCachedCoordinates = (pincode, coords) => {
+  memoryCache.set(pincode, coords);
+  const storageCache = readStorageCache();
+  storageCache[pincode] = coords;
+  writeStorageCache(storageCache);
+};
+
 /**
  * Geocode a pincode to coordinates
  * @param {string} pincode - The pincode to geocode
  * @returns {Promise<[number, number]>} - [latitude, longitude]
  */
 export const geocodePincode = async (pincode) => {
+  const cached = getCachedCoordinates(pincode);
+  if (cached) {
+    return cached;
+  }
+
   // Check if we have coordinates in our mapping
   if (pincodeCoordinates[pincode]) {
+    setCachedCoordinates(pincode, pincodeCoordinates[pincode]);
     return pincodeCoordinates[pincode];
   }
 
@@ -44,7 +91,9 @@ export const geocodePincode = async (pincode) => {
     
     const data = await response.json();
     if (data && data.length > 0) {
-      return [parseFloat(data[0].lat), parseFloat(data[0].lon)];
+      const coords = [parseFloat(data[0].lat), parseFloat(data[0].lon)];
+      setCachedCoordinates(pincode, coords);
+      return coords;
     }
   } catch (error) {
     console.warn(`Failed to geocode pincode ${pincode}:`, error);

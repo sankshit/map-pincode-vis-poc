@@ -9,9 +9,6 @@ import pincodeSalesData from "./data/pincodeSales.json";
 const App = () => {
   return (
     <div className="App">
-      <h1 style={{ padding: "10px", margin: 0, backgroundColor: "#f0f0f0" }}>
-        Pincode Sales Map Visualization
-      </h1>
       <PincodeMap data={pincodeSalesData} />
     </div>
   );

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { Map, TileLayer, useLeaflet } from "react-leaflet";
 import L from "leaflet";
 import { geocodePincode } from "../utils/geocode";
@@ -27,18 +27,48 @@ const FitBounds = ({ bounds }) => {
   return null;
 };
 
+const TILE_LAYERS = {
+  light: {
+    label: "Light",
+    url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+    attribution:
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+  },
+  dark: {
+    label: "Dark",
+    url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
+    attribution:
+      '&copy; <a href="https://carto.com/attributions">CARTO</a> contributors'
+  }
+};
+
 const PincodeMap = ({ data }) => {
   const [geocodedData, setGeocodedData] = useState([]);
   const [loading, setLoading] = useState(true);
-  const [bounds, setBounds] = useState(null);
+  const [geocodeProgress, setGeocodeProgress] = useState({
+    current: 0,
+    total: 0,
+    failures: 0
+  });
+  const [searchTerm, setSearchTerm] = useState("");
+  const [minSalesFilter, setMinSalesFilter] = useState("");
+  const [maxSalesFilter, setMaxSalesFilter] = useState("");
+  const [limit, setLimit] = useState("all");
+  const [tileStyle, setTileStyle] = useState("light");
+  const [autoFit, setAutoFit] = useState(true);
+  const [selectedPincode, setSelectedPincode] = useState(null);
+  const [mapInstance, setMapInstance] = useState(null);
 
   useEffect(() => {
     const loadData = async () => {
       setLoading(true);
       const geocoded = [];
-      const boundsArray = [];
+      const total = data ? data.length : 0;
+      let failures = 0;
+      setGeocodeProgress({ current: 0, total, failures: 0 });
 
       if (data && data.length > 0) {
+        let index = 0;
         for (const item of data) {
           const coords = await geocodePincode(item.pincode);
           if (coords) {
@@ -46,23 +76,26 @@ const PincodeMap = ({ data }) => {
               ...item,
               coordinates: coords,
             });
-            boundsArray.push(coords);
+          } else {
+            failures += 1;
           }
           // Small delay to avoid rate limiting
           await new Promise(resolve => setTimeout(resolve, 300));
+          index += 1;
+          setGeocodeProgress({ current: index, total, failures });
         }
       }
 
       setGeocodedData(geocoded);
-      setBounds(boundsArray);
       setLoading(false);
     };
 
     loadData();
   }, [data]);
 
-  // Calculate min and max sales for scaling
-  const salesValues = geocodedData.length > 0 ? geocodedData.map(item => item.sales) : [0];
+  const salesValues = useMemo(() => (
+    geocodedData.length > 0 ? geocodedData.map(item => item.sales) : [0]
+  ), [geocodedData]);
   const minSales = salesValues.length > 0 ? Math.min(...salesValues) : 0;
   const maxSales = salesValues.length > 0 ? Math.max(...salesValues) : 1;
 
@@ -94,16 +127,95 @@ const PincodeMap = ({ data }) => {
     return `₹${sales}`;
   };
 
+  const normalizedSearch = searchTerm.trim();
+  const minFilterValue = minSalesFilter === "" ? null : Number(minSalesFilter);
+  const maxFilterValue = maxSalesFilter === "" ? null : Number(maxSalesFilter);
+
+  const filteredData = useMemo(() => {
+    return geocodedData.filter((item) => {
+      const matchesSearch = normalizedSearch
+        ? item.pincode.toString().includes(normalizedSearch)
+        : true;
+      const matchesMin = minFilterValue === null ? true : item.sales >= minFilterValue;
+      const matchesMax = maxFilterValue === null ? true : item.sales <= maxFilterValue;
+      return matchesSearch && matchesMin && matchesMax;
+    });
+  }, [geocodedData, normalizedSearch, minFilterValue, maxFilterValue]);
+
+  const displayData = useMemo(() => {
+    const sorted = [...filteredData].sort((a, b) => b.sales - a.sales);
+    if (limit === "all") {
+      return sorted;
+    }
+    const limitValue = Number(limit);
+    return Number.isNaN(limitValue) ? sorted : sorted.slice(0, limitValue);
+  }, [filteredData, limit]);
+
+  const displayBounds = useMemo(() => {
+    return displayData.map(item => item.coordinates);
+  }, [displayData]);
+
+  const totalSales = useMemo(() => (
+    displayData.reduce((sum, item) => sum + item.sales, 0)
+  ), [displayData]);
+  const averageSales = displayData.length > 0 ? totalSales / displayData.length : 0;
+  const maxDisplaySales = displayData.length > 0
+    ? Math.max(...displayData.map(item => item.sales))
+    : 0;
+
+  const selectedItem = useMemo(() => (
+    geocodedData.find(item => item.pincode === selectedPincode) || null
+  ), [geocodedData, selectedPincode]);
+  const selectedIsVisible = useMemo(() => (
+    displayData.some(item => item.pincode === selectedPincode)
+  ), [displayData, selectedPincode]);
+
+  useEffect(() => {
+    if (mapInstance && selectedItem && selectedIsVisible) {
+      const targetZoom = Math.max(mapInstance.getZoom(), 8);
+      mapInstance.flyTo(selectedItem.coordinates, targetZoom, { duration: 0.6 });
+    }
+  }, [mapInstance, selectedItem, selectedIsVisible]);
+
+  const handleExportCsv = () => {
+    const header = ["pincode", "sales", "lat", "lng"];
+    const rows = displayData.map(item => [
+      item.pincode,
+      item.sales,
+      item.coordinates[0],
+      item.coordinates[1]
+    ]);
+    const csv = [header, ...rows].map(row => row.join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.setAttribute("download", "pincode_sales_export.csv");
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(url);
+  };
+
+  const handleClearFilters = () => {
+    setSearchTerm("");
+    setMinSalesFilter("");
+    setMaxSalesFilter("");
+    setLimit("all");
+  };
+
   if (loading) {
     return (
-      <div style={{ 
-        height: "90vh", 
-        display: "flex", 
-        alignItems: "center", 
-        justifyContent: "center",
-        fontSize: "18px"
-      }}>
-        Loading pincode data and geocoding...
+      <div className="loading-panel">
+        <div className="loading-title">Loading pincode data and geocoding...</div>
+        <div className="loading-subtitle">
+          {geocodeProgress.total > 0
+            ? `Processed ${geocodeProgress.current} of ${geocodeProgress.total}`
+            : "Preparing dataset"}
+          {geocodeProgress.failures > 0
+            ? ` • ${geocodeProgress.failures} failed`
+            : ""}
+        </div>
       </div>
     );
   }
@@ -161,36 +273,201 @@ const PincodeMap = ({ data }) => {
     );
   }
 
+  const tileLayer = TILE_LAYERS[tileStyle];
+  const topPincodes = displayData.slice(0, 5);
+
   // Default center (India)
   const defaultCenter = [20.5937, 78.9629];
 
   return (
-    <div>
-      <Map
-        center={defaultCenter}
-        zoom={5}
-        style={{ height: "90vh", width: "100%" }}
-        maxZoom={20}
-      >
-        <TileLayer
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
-        />
-        <FitBounds bounds={bounds} />
-        <PincodeCluster 
-          geocodedData={geocodedData}
-          getColor={getColor}
-          getRadius={getRadius}
-          formatSales={formatSales}
-        />
-      </Map>
-      
-      <div style={{ 
-        padding: "10px", 
-        backgroundColor: "#f0f0f0",
-        borderTop: "1px solid #ccc"
-      }}>
-        <strong>Legend:</strong> Circle size and color represent sales value (larger/darker = higher sales)
+    <div className="dashboard">
+      <div className="dashboard-header">
+        <div>
+          <div className="dashboard-title">Pincode Sales Intelligence</div>
+          <div className="dashboard-subtitle">
+            Filter, inspect, and export sales signals across India
+          </div>
+        </div>
+        <div className="header-meta">
+          <div className="meta-chip">{geocodedData.length} pincodes</div>
+          <div className="meta-chip">Updated just now</div>
+        </div>
+      </div>
+
+      <div className="dashboard-toolbar">
+        <div className="toolbar-group">
+          <label className="field">
+            <span>Pincode search</span>
+            <input
+              type="search"
+              placeholder="e.g. 110001"
+              value={searchTerm}
+              onChange={(event) => setSearchTerm(event.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span>Min sales</span>
+            <input
+              type="number"
+              min="0"
+              value={minSalesFilter}
+              onChange={(event) => setMinSalesFilter(event.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span>Max sales</span>
+            <input
+              type="number"
+              min="0"
+              value={maxSalesFilter}
+              onChange={(event) => setMaxSalesFilter(event.target.value)}
+            />
+          </label>
+          <label className="field">
+            <span>Limit</span>
+            <select value={limit} onChange={(event) => setLimit(event.target.value)}>
+              <option value="all">All</option>
+              <option value="100">Top 100</option>
+              <option value="250">Top 250</option>
+              <option value="500">Top 500</option>
+            </select>
+          </label>
+        </div>
+        <div className="toolbar-group">
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={autoFit}
+              onChange={(event) => setAutoFit(event.target.checked)}
+            />
+            Auto-fit view
+          </label>
+          <label className="field">
+            <span>Basemap</span>
+            <select
+              value={tileStyle}
+              onChange={(event) => setTileStyle(event.target.value)}
+            >
+              {Object.entries(TILE_LAYERS).map(([key, layer]) => (
+                <option key={key} value={key}>{layer.label}</option>
+              ))}
+            </select>
+          </label>
+          <button className="button" type="button" onClick={handleExportCsv}>
+            Export CSV
+          </button>
+          <button className="button ghost" type="button" onClick={handleClearFilters}>
+            Reset filters
+          </button>
+        </div>
+      </div>
+
+      <div className="dashboard-content">
+        <div className="map-wrapper">
+          <Map
+            center={defaultCenter}
+            zoom={5}
+            style={{ height: "100%", width: "100%" }}
+            maxZoom={20}
+            whenCreated={setMapInstance}
+          >
+            <TileLayer url={tileLayer.url} attribution={tileLayer.attribution} />
+            {autoFit && displayBounds.length > 0 ? (
+              <FitBounds bounds={displayBounds} />
+            ) : null}
+            <PincodeCluster 
+              geocodedData={displayData}
+              getColor={getColor}
+              getRadius={getRadius}
+              formatSales={formatSales}
+              selectedPincode={selectedPincode}
+              onSelect={(item) => setSelectedPincode(item.pincode)}
+            />
+          </Map>
+          <div className="map-legend">
+            <strong>Legend:</strong> Circle size and color represent sales value (larger/darker = higher sales)
+          </div>
+        </div>
+
+        <div className="side-panel">
+          <div className="panel-section">
+            <div className="panel-title">Overview</div>
+            <div className="stat-grid">
+              <div className="stat-card">
+                <div className="stat-label">Displayed pincodes</div>
+                <div className="stat-value">{displayData.length}</div>
+                <div className="stat-footnote">of {geocodedData.length} total</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-label">Displayed sales</div>
+                <div className="stat-value">{formatSales(totalSales)}</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-label">Average sales</div>
+                <div className="stat-value">{formatSales(Math.round(averageSales))}</div>
+              </div>
+              <div className="stat-card">
+                <div className="stat-label">Max sales</div>
+                <div className="stat-value">{formatSales(maxDisplaySales)}</div>
+              </div>
+            </div>
+            {displayData.length === 0 ? (
+              <div className="panel-note">
+                No results match the current filters.
+              </div>
+            ) : null}
+          </div>
+
+          <div className="panel-section">
+            <div className="panel-title">Selected pincode</div>
+            {selectedItem ? (
+              <div className="selection-card">
+                <div className="selection-row">
+                  <span>Pincode</span>
+                  <strong>{selectedItem.pincode}</strong>
+                </div>
+                <div className="selection-row">
+                  <span>Sales</span>
+                  <strong>{formatSales(selectedItem.sales)}</strong>
+                </div>
+                <div className="selection-row">
+                  <span>Coordinates</span>
+                  <strong>
+                    {selectedItem.coordinates[0].toFixed(4)}, {selectedItem.coordinates[1].toFixed(4)}
+                  </strong>
+                </div>
+                {!selectedIsVisible ? (
+                  <div className="panel-note">
+                    Selected pincode is hidden by current filters.
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <div className="panel-note">Click a marker or list item to inspect details.</div>
+            )}
+          </div>
+
+          <div className="panel-section">
+            <div className="panel-title">Top performing pincodes</div>
+            {topPincodes.length === 0 ? (
+              <div className="panel-note">No pincodes to display.</div>
+            ) : (
+              <div className="top-list">
+                {topPincodes.map((item) => (
+                  <button
+                    key={item.pincode}
+                    type="button"
+                    className={`top-item ${selectedPincode === item.pincode ? "active" : ""}`}
+                    onClick={() => setSelectedPincode(item.pincode)}
+                  >
+                    <span>{item.pincode}</span>
+                    <strong>{formatSales(item.sales)}</strong>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
