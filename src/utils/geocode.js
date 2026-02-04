@@ -2,6 +2,8 @@
 // This uses a free geocoding service for Indian pincodes
 // You can replace this with your own geocoding service or API
 
+import pincodeLatLng from "../data/india_pincodes_lat_lng.json";
+
 // Sample mapping for some common Indian pincodes (you can expand this)
 const pincodeCoordinates = {
   "110001": [28.6139, 77.2090], // New Delhi
@@ -59,21 +61,35 @@ const setCachedCoordinates = (pincode, coords) => {
   writeStorageCache(storageCache);
 };
 
+const normalizePincode = (pincode) => String(pincode || "").trim();
+
 /**
- * Geocode a pincode to coordinates
+ * Geocode a pincode to coordinates with metadata
  * @param {string} pincode - The pincode to geocode
- * @returns {Promise<[number, number]>} - [latitude, longitude]
+ * @returns {Promise<{coords: [number, number] | null, source: string}>}
  */
-export const geocodePincode = async (pincode) => {
-  const cached = getCachedCoordinates(pincode);
+export const geocodePincodeWithMeta = async (pincode) => {
+  const normalizedPincode = normalizePincode(pincode);
+  if (!normalizedPincode) {
+    return { coords: null, source: "invalid" };
+  }
+
+  const cached = getCachedCoordinates(normalizedPincode);
   if (cached) {
-    return cached;
+    return { coords: cached, source: "cache" };
+  }
+
+  const localEntry = pincodeLatLng[normalizedPincode];
+  if (localEntry && typeof localEntry.lat === "number" && typeof localEntry.lng === "number") {
+    const coords = [localEntry.lat, localEntry.lng];
+    setCachedCoordinates(normalizedPincode, coords);
+    return { coords, source: "local" };
   }
 
   // Check if we have coordinates in our mapping
-  if (pincodeCoordinates[pincode]) {
-    setCachedCoordinates(pincode, pincodeCoordinates[pincode]);
-    return pincodeCoordinates[pincode];
+  if (pincodeCoordinates[normalizedPincode]) {
+    setCachedCoordinates(normalizedPincode, pincodeCoordinates[normalizedPincode]);
+    return { coords: pincodeCoordinates[normalizedPincode], source: "static" };
   }
 
   // For Indian pincodes, you can use a geocoding API
@@ -81,7 +97,7 @@ export const geocodePincode = async (pincode) => {
   try {
     // Using Nominatim (OpenStreetMap) geocoding - free but rate-limited
     const response = await fetch(
-      `https://nominatim.openstreetmap.org/search?postalcode=${pincode}&country=India&format=json&limit=1`,
+      `https://nominatim.openstreetmap.org/search?postalcode=${normalizedPincode}&country=India&format=json&limit=1`,
       {
         headers: {
           'User-Agent': 'MapChartApp/1.0'
@@ -92,15 +108,25 @@ export const geocodePincode = async (pincode) => {
     const data = await response.json();
     if (data && data.length > 0) {
       const coords = [parseFloat(data[0].lat), parseFloat(data[0].lon)];
-      setCachedCoordinates(pincode, coords);
-      return coords;
+      setCachedCoordinates(normalizedPincode, coords);
+      return { coords, source: "api" };
     }
   } catch (error) {
-    console.warn(`Failed to geocode pincode ${pincode}:`, error);
+    console.warn(`Failed to geocode pincode ${normalizedPincode}:`, error);
   }
 
   // Fallback: return null if geocoding fails
-  return null;
+  return { coords: null, source: "none" };
+};
+
+/**
+ * Geocode a pincode to coordinates
+ * @param {string} pincode - The pincode to geocode
+ * @returns {Promise<[number, number]>} - [latitude, longitude]
+ */
+export const geocodePincode = async (pincode) => {
+  const result = await geocodePincodeWithMeta(pincode);
+  return result.coords;
 };
 
 /**
@@ -114,13 +140,13 @@ export const geocodePincodes = async (pincodes) => {
   // Process in batches to avoid rate limiting
   for (let i = 0; i < pincodes.length; i++) {
     const pincode = pincodes[i];
-    const coords = await geocodePincode(pincode);
-    if (coords) {
-      results[pincode] = coords;
+    const result = await geocodePincodeWithMeta(pincode);
+    if (result.coords) {
+      results[pincode] = result.coords;
     }
     
     // Add delay to avoid rate limiting (500ms between requests)
-    if (i < pincodes.length - 1) {
+    if (result.source === "api" && i < pincodes.length - 1) {
       await new Promise(resolve => setTimeout(resolve, 500));
     }
   }

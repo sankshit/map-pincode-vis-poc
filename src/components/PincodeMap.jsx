@@ -1,8 +1,8 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Map, TileLayer, useLeaflet } from "react-leaflet";
+import { Map as LeafletMap, TileLayer, useLeaflet } from "react-leaflet";
 import L from "leaflet";
 import "leaflet.heat";
-import { geocodePincode } from "../utils/geocode";
+import { geocodePincodeWithMeta } from "../utils/geocode";
 import PincodeCluster from "./PincodeCluster";
 
 // Fix for default marker icons in react-leaflet
@@ -114,51 +114,10 @@ const TILE_LAYERS = {
 };
 
 const parseCsvText = (text) => {
-  const rows = [];
-  let row = [];
-  let current = "";
-  let inQuotes = false;
-
-  for (let i = 0; i < text.length; i += 1) {
-    const char = text[i];
-    const next = text[i + 1];
-
-    if (char === '"') {
-      if (inQuotes && next === '"') {
-        current += '"';
-        i += 1;
-      } else {
-        inQuotes = !inQuotes;
-      }
-      continue;
-    }
-
-    if (char === "," && !inQuotes) {
-      row.push(current);
-      current = "";
-      continue;
-    }
-
-    if ((char === "\n" || char === "\r") && !inQuotes) {
-      if (char === "\r" && next === "\n") {
-        i += 1;
-      }
-      row.push(current);
-      rows.push(row);
-      row = [];
-      current = "";
-      continue;
-    }
-
-    current += char;
-  }
-
-  if (current.length > 0 || row.length > 0) {
-    row.push(current);
-    rows.push(row);
-  }
-
-  return rows.filter((entry) => entry.some((cell) => cell.trim() !== ""));
+  const safeText = typeof text === "string" ? text : "";
+  const normalized = safeText.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const lines = normalized.split("\n").filter((line) => line.trim() !== "");
+  return lines.map((line) => line.split(",").map((cell) => cell.trim()));
 };
 
 const PincodeMap = ({ data }) => {
@@ -207,19 +166,25 @@ const PincodeMap = ({ data }) => {
         for (const item of sourceData) {
           if (item.coordinates) {
             geocoded.push(item);
+            setGeocodedData([...geocoded]);
+            index += 1;
+            setGeocodeProgress({ current: index, total: geocodeTotal, failures });
             continue;
           }
-          const coords = await geocodePincode(item.pincode);
-          if (coords) {
+          const result = await geocodePincodeWithMeta(item.pincode);
+          if (result.coords) {
             geocoded.push({
               ...item,
-              coordinates: coords,
+              coordinates: result.coords,
             });
+            setGeocodedData([...geocoded]);
           } else {
             failures += 1;
           }
-          // Small delay to avoid rate limiting
-          await new Promise(resolve => setTimeout(resolve, 300));
+          // Add delay only when we made an API call
+          if (result.source === "api") {
+            await new Promise(resolve => setTimeout(resolve, 300));
+          }
           index += 1;
           setGeocodeProgress({ current: index, total: geocodeTotal, failures });
         }
@@ -385,17 +350,36 @@ const PincodeMap = ({ data }) => {
 
   const parseCsvFile = (text, fileName) => {
     const rows = parseCsvText(text);
+    console.debug("[CSV Upload] Parsed rows", {
+      fileName,
+      totalRows: rows.length,
+      sample: rows.slice(0, 3)
+    });
     if (rows.length === 0) {
       throw new Error("The file is empty. Please upload a CSV with headers.");
     }
 
-    const headerRow = rows[0].map((cell) => cell.trim().toLowerCase());
+    if (!rows[0] || !Array.isArray(rows[0])) {
+      console.debug("[CSV Upload] Invalid header row", { headerRow: rows[0] });
+      throw new Error("Invalid CSV header row.");
+    }
+
+    const headerRow = rows[0].map((cell, index) => {
+      const trimmed = typeof cell === "string" ? cell.trim() : String(cell ?? "").trim();
+      const cleaned = index === 0 ? trimmed.replace(/^\uFEFF/, "") : trimmed;
+      return cleaned.toLowerCase();
+    });
     const indexOf = (aliases) =>
       aliases.map((name) => headerRow.indexOf(name)).find((idx) => idx >= 0);
     const pincodeIndex = indexOf(["pincode", "pin", "postalcode", "postal_code"]);
     const salesIndex = indexOf(["sales", "sale", "amount", "value"]);
 
     if (pincodeIndex === undefined || salesIndex === undefined) {
+      console.debug("[CSV Upload] Missing required columns", {
+        headerRow,
+        pincodeIndex,
+        salesIndex
+      });
       throw new Error("Missing required columns. CSV must include pincode and sales.");
     }
 
@@ -404,6 +388,10 @@ const PincodeMap = ({ data }) => {
 
     for (let i = 1; i < rows.length; i += 1) {
       const row = rows[i];
+      if (!Array.isArray(row)) {
+        invalidRows += 1;
+        continue;
+      }
       const rawPincode = row[pincodeIndex] ? row[pincodeIndex].trim() : "";
       const rawSales = row[salesIndex] ? row[salesIndex].trim() : "";
       const sales = Number(rawSales);
@@ -424,6 +412,10 @@ const PincodeMap = ({ data }) => {
     const parsedRows = Array.from(aggregated.values());
 
     if (parsedRows.length === 0) {
+      console.debug("[CSV Upload] No valid rows after parsing", {
+        invalidRows,
+        totalRows: rows.length
+      });
       throw new Error("No valid rows found. Check pincode and sales values.");
     }
 
@@ -440,7 +432,8 @@ const PincodeMap = ({ data }) => {
   };
 
   const handleUpload = (event) => {
-    const file = event.target.files && event.target.files[0];
+    const inputEl = event.target;
+    const file = inputEl && inputEl.files && inputEl.files[0];
     if (!file) return;
 
     setIsParsing(true);
@@ -448,8 +441,17 @@ const PincodeMap = ({ data }) => {
 
     reader.onload = () => {
       try {
+        console.debug("[CSV Upload] File loaded", {
+          fileName: file.name,
+          size: file.size,
+          type: file.type
+        });
         parseCsvFile(reader.result || "", file.name);
       } catch (error) {
+        console.error("[CSV Upload] Parse failed", {
+          fileName: file.name,
+          error
+        });
         setUploadError(error.message || "Unable to parse CSV file.");
         setUploadedData([]);
         setUploadMeta({
@@ -461,20 +463,24 @@ const PincodeMap = ({ data }) => {
         });
       } finally {
         setIsParsing(false);
-        event.target.value = "";
+        if (inputEl && typeof inputEl.value !== "undefined") {
+          inputEl.value = "";
+        }
       }
     };
 
     reader.onerror = () => {
       setUploadError("Failed to read the file. Please try again.");
       setIsParsing(false);
-      event.target.value = "";
+      if (inputEl && typeof inputEl.value !== "undefined") {
+        inputEl.value = "";
+      }
     };
 
     reader.readAsText(file);
   };
 
-  if (loading) {
+  if (loading && geocodedData.length === 0) {
     return (
       <div className="loading-panel">
         <div className="loading-title">Loading pincode data and geocoding...</div>
@@ -493,19 +499,17 @@ const PincodeMap = ({ data }) => {
   if (geocodedData.length === 0 && !loading) {
     return (
       <div className="empty-state">
-        <Map
+        <LeafletMap
           center={[20.5937, 78.9629]}
           zoom={5}
           style={{ height: "70vh", width: "100%" }}
           maxZoom={20}
         >
           <TileLayer
-            url={TILE_LAYERS.imagery.url}
-            attribution={TILE_LAYERS.imagery.attribution}
-            maxNativeZoom={TILE_LAYERS.imagery.maxNativeZoom}
-            detectRetina
+            url={TILE_LAYERS.light.url}
+            attribution={TILE_LAYERS.light.attribution}
           />
-        </Map>
+        </LeafletMap>
         <div className="empty-card">
           <div className="empty-title">No pincode data found</div>
           <div className="empty-subtitle">
@@ -565,6 +569,14 @@ const PincodeMap = ({ data }) => {
           <div className="meta-chip">
             {uploadMeta.hasFile ? `Uploaded: ${uploadMeta.fileName}` : "Bundled dataset"}
           </div>
+          {loading ? (
+            <div className="meta-chip">
+              {geocodeProgress.total > 0
+                ? `Geocoding ${geocodeProgress.current}/${geocodeProgress.total}`
+                : "Preparing geocoding"}
+              {geocodeProgress.failures > 0 ? ` • ${geocodeProgress.failures} failed` : ""}
+            </div>
+          ) : null}
         </div>
       </div>
 
@@ -678,7 +690,7 @@ const PincodeMap = ({ data }) => {
               value={tileStyle}
               onChange={(event) => setTileStyle(event.target.value)}
             >
-              {Object.entries(TILE_LAYERS).map(([key, layer]) => (
+              {Object.entries(TILE_LAYERS || {}).map(([key, layer]) => (
                 <option key={key} value={key}>{layer.label}</option>
               ))}
             </select>
@@ -694,7 +706,7 @@ const PincodeMap = ({ data }) => {
 
       <div className="dashboard-content">
         <div className="map-wrapper">
-          <Map
+          <LeafletMap
             center={defaultCenter}
             zoom={5}
             style={{ height: "100%", width: "100%" }}
@@ -733,7 +745,7 @@ const PincodeMap = ({ data }) => {
                 onSelect={(item) => setSelectedPincode(item.pincode)}
               />
             )}
-          </Map>
+          </LeafletMap>
           <div className="map-legend">
             <strong>Legend:</strong>{" "}
             {showHeatmap
