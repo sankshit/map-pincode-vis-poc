@@ -1,6 +1,7 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Map, TileLayer, useLeaflet } from "react-leaflet";
 import L from "leaflet";
+import "leaflet.heat";
 import { geocodePincode } from "../utils/geocode";
 import PincodeCluster from "./PincodeCluster";
 
@@ -27,22 +28,150 @@ const FitBounds = ({ bounds }) => {
   return null;
 };
 
+const HeatmapLayer = ({ points, options }) => {
+  const { map } = useLeaflet();
+  const layerRef = useRef(null);
+
+  useEffect(() => {
+    if (!map) return;
+
+    if (layerRef.current) {
+      map.removeLayer(layerRef.current);
+      layerRef.current = null;
+    }
+
+    if (!points || points.length === 0) return;
+
+    const layer = L.heatLayer(points, options);
+    layer.addTo(map);
+    layerRef.current = layer;
+
+    return () => {
+      if (layerRef.current) {
+        map.removeLayer(layerRef.current);
+        layerRef.current = null;
+      }
+    };
+  }, [map, points, options]);
+
+  return null;
+};
+
 const TILE_LAYERS = {
-  light: {
-    label: "Light",
+  osm: {
+    label: "OpenStreetMap",
     url: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
     attribution:
-      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+      '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+    maxNativeZoom: 19
+  },
+  light: {
+    label: "Light",
+    url: "https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png",
+    attribution:
+      '&copy; <a href="https://carto.com/attributions">CARTO</a> contributors',
+    maxNativeZoom: 19
   },
   dark: {
     label: "Dark",
     url: "https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png",
     attribution:
-      '&copy; <a href="https://carto.com/attributions">CARTO</a> contributors'
+      '&copy; <a href="https://carto.com/attributions">CARTO</a> contributors',
+    maxNativeZoom: 19
+  },
+  imagery: {
+    label: "Imagery",
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    attribution:
+      "Tiles &copy; Esri &mdash; Source: Esri, i-cubed, USDA, USGS, AEX, GeoEye, " +
+      "Getmapping, Aerogrid, IGN, IGP, UPR-EGP, and the GIS User Community",
+    maxNativeZoom: 19
+  },
+  topo: {
+    label: "Topographic",
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Topo_Map/MapServer/tile/{z}/{y}/{x}",
+    attribution:
+      "Tiles &copy; Esri &mdash; Source: Esri, DeLorme, NAVTEQ, USGS, Intermap, " +
+      "iPC, NRCAN, Esri Japan, METI, Esri China (Hong Kong), and the GIS User Community",
+    maxNativeZoom: 19
+  },
+  streets: {
+    label: "Streets",
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+    attribution:
+      "Tiles &copy; Esri &mdash; Source: Esri, DeLorme, NAVTEQ, USGS, Intermap, " +
+      "iPC, NRCAN, Esri Japan, METI, Esri China (Hong Kong), and the GIS User Community",
+    maxNativeZoom: 19
+  },
+  natgeo: {
+    label: "NatGeo",
+    url: "https://server.arcgisonline.com/ArcGIS/rest/services/NatGeo_World_Map/MapServer/tile/{z}/{y}/{x}",
+    attribution:
+      "Tiles &copy; Esri &mdash; National Geographic, Esri, DeLorme, NAVTEQ, UNEP-WCMC, " +
+      "USGS, NASA, ESA, METI, NRCAN, GEBCO, NOAA, and the GIS User Community",
+    maxNativeZoom: 16
   }
 };
 
+const parseCsvText = (text) => {
+  const rows = [];
+  let row = [];
+  let current = "";
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    const next = text[i + 1];
+
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        current += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === "," && !inQuotes) {
+      row.push(current);
+      current = "";
+      continue;
+    }
+
+    if ((char === "\n" || char === "\r") && !inQuotes) {
+      if (char === "\r" && next === "\n") {
+        i += 1;
+      }
+      row.push(current);
+      rows.push(row);
+      row = [];
+      current = "";
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (current.length > 0 || row.length > 0) {
+    row.push(current);
+    rows.push(row);
+  }
+
+  return rows.filter((entry) => entry.some((cell) => cell.trim() !== ""));
+};
+
 const PincodeMap = ({ data }) => {
+  const [uploadedData, setUploadedData] = useState([]);
+  const [uploadMeta, setUploadMeta] = useState({
+    hasFile: false,
+    fileName: "",
+    validRows: 0,
+    invalidRows: 0,
+    usedLatLng: 0
+  });
+  const [uploadError, setUploadError] = useState("");
+  const [isParsing, setIsParsing] = useState(false);
   const [geocodedData, setGeocodedData] = useState([]);
   const [loading, setLoading] = useState(true);
   const [geocodeProgress, setGeocodeProgress] = useState({
@@ -54,22 +183,32 @@ const PincodeMap = ({ data }) => {
   const [minSalesFilter, setMinSalesFilter] = useState("");
   const [maxSalesFilter, setMaxSalesFilter] = useState("");
   const [limit, setLimit] = useState("all");
-  const [tileStyle, setTileStyle] = useState("light");
+  const [tileStyle, setTileStyle] = useState("imagery");
   const [autoFit, setAutoFit] = useState(true);
+  const [showHeatmap, setShowHeatmap] = useState(false);
   const [selectedPincode, setSelectedPincode] = useState(null);
   const [mapInstance, setMapInstance] = useState(null);
+  const sourceData = uploadMeta.hasFile ? uploadedData : data;
 
   useEffect(() => {
     const loadData = async () => {
       setLoading(true);
       const geocoded = [];
-      const total = data ? data.length : 0;
+      const total = sourceData ? sourceData.length : 0;
+      const geocodeTargets = sourceData
+        ? sourceData.filter((item) => !item.coordinates)
+        : [];
+      const geocodeTotal = geocodeTargets.length;
       let failures = 0;
-      setGeocodeProgress({ current: 0, total, failures: 0 });
+      setGeocodeProgress({ current: 0, total: geocodeTotal, failures: 0 });
 
-      if (data && data.length > 0) {
+      if (sourceData && sourceData.length > 0) {
         let index = 0;
-        for (const item of data) {
+        for (const item of sourceData) {
+          if (item.coordinates) {
+            geocoded.push(item);
+            continue;
+          }
           const coords = await geocodePincode(item.pincode);
           if (coords) {
             geocoded.push({
@@ -82,7 +221,7 @@ const PincodeMap = ({ data }) => {
           // Small delay to avoid rate limiting
           await new Promise(resolve => setTimeout(resolve, 300));
           index += 1;
-          setGeocodeProgress({ current: index, total, failures });
+          setGeocodeProgress({ current: index, total: geocodeTotal, failures });
         }
       }
 
@@ -91,31 +230,7 @@ const PincodeMap = ({ data }) => {
     };
 
     loadData();
-  }, [data]);
-
-  const salesValues = useMemo(() => (
-    geocodedData.length > 0 ? geocodedData.map(item => item.sales) : [0]
-  ), [geocodedData]);
-  const minSales = salesValues.length > 0 ? Math.min(...salesValues) : 0;
-  const maxSales = salesValues.length > 0 ? Math.max(...salesValues) : 1;
-
-  // Function to get color based on sales value
-  const getColor = (sales) => {
-    if (maxSales === minSales) return "#3388ff";
-    const ratio = (sales - minSales) / (maxSales - minSales);
-    // Color gradient from blue (low) to red (high) - improved colors
-    const r = Math.floor(50 + 205 * ratio);
-    const g = Math.floor(100 * (1 - ratio));
-    const b = Math.floor(200 + 55 * (1 - ratio));
-    return `rgb(${r}, ${g}, ${b})`;
-  };
-
-  // Function to get radius based on sales value
-  const getRadius = (sales) => {
-    if (maxSales === minSales) return 8;
-    const ratio = (sales - minSales) / (maxSales - minSales);
-    return 5 + ratio * 20; // Radius between 5 and 25
-  };
+  }, [sourceData]);
 
   // Format sales value for display
   const formatSales = (sales) => {
@@ -151,8 +266,58 @@ const PincodeMap = ({ data }) => {
     return Number.isNaN(limitValue) ? sorted : sorted.slice(0, limitValue);
   }, [filteredData, limit]);
 
+  const salesValues = useMemo(() => (
+    displayData.length > 0 ? displayData.map(item => item.sales) : [0]
+  ), [displayData]);
+  const minSales = salesValues.length > 0 ? Math.min(...salesValues) : 0;
+  const maxSales = salesValues.length > 0 ? Math.max(...salesValues) : 1;
+
+  // Function to get color based on sales value
+  const getColor = (sales) => {
+    if (maxSales === minSales) return "#3388ff";
+    const ratio = (sales - minSales) / (maxSales - minSales);
+    // Color gradient from blue (low) to red (high) - improved colors
+    const r = Math.floor(50 + 205 * ratio);
+    const g = Math.floor(100 * (1 - ratio));
+    const b = Math.floor(200 + 55 * (1 - ratio));
+    return `rgb(${r}, ${g}, ${b})`;
+  };
+
+  // Function to get radius based on sales value
+  const getRadius = (sales) => {
+    if (maxSales === minSales) return 8;
+    const ratio = (sales - minSales) / (maxSales - minSales);
+    return 5 + ratio * 20; // Radius between 5 and 25
+  };
+
   const displayBounds = useMemo(() => {
     return displayData.map(item => item.coordinates);
+  }, [displayData]);
+
+  const heatmapGroups = useMemo(() => {
+    if (displayData.length === 0) return [];
+    const values = displayData.map(item => item.sales);
+    const minValue = Math.min(...values);
+    const maxValue = Math.max(...values);
+    const range = maxValue - minValue;
+    const buckets = [
+      { id: "low", radius: 18, blur: 14, points: [] },
+      { id: "mid", radius: 28, blur: 20, points: [] },
+      { id: "high", radius: 38, blur: 26, points: [] }
+    ];
+
+    displayData.forEach((item) => {
+      const ratio = range === 0 ? 0.5 : (item.sales - minValue) / range;
+      const intensity = range === 0 ? 0.6 : 0.2 + 0.8 * ratio;
+      const bucketIndex = ratio < 0.33 ? 0 : ratio < 0.66 ? 1 : 2;
+      buckets[bucketIndex].points.push([
+        item.coordinates[0],
+        item.coordinates[1],
+        intensity
+      ]);
+    });
+
+    return buckets.filter(bucket => bucket.points.length > 0);
   }, [displayData]);
 
   const totalSales = useMemo(() => (
@@ -202,6 +367,111 @@ const PincodeMap = ({ data }) => {
     setMinSalesFilter("");
     setMaxSalesFilter("");
     setLimit("all");
+    setSelectedPincode(null);
+  };
+
+  const handleResetUpload = () => {
+    setUploadedData([]);
+    setUploadMeta({
+      hasFile: false,
+      fileName: "",
+      validRows: 0,
+      invalidRows: 0,
+      usedLatLng: 0
+    });
+    setUploadError("");
+    handleClearFilters();
+  };
+
+  const parseCsvFile = (text, fileName) => {
+    const rows = parseCsvText(text);
+    if (rows.length === 0) {
+      throw new Error("The file is empty. Please upload a CSV with headers.");
+    }
+
+    const headerRow = rows[0].map((cell) => cell.trim().toLowerCase());
+    const indexOf = (aliases) =>
+      aliases.map((name) => headerRow.indexOf(name)).find((idx) => idx >= 0);
+    const pincodeIndex = indexOf(["pincode", "pin", "postalcode", "postal_code"]);
+    const salesIndex = indexOf(["sales", "sale", "amount", "value"]);
+
+    if (pincodeIndex === undefined || salesIndex === undefined) {
+      throw new Error("Missing required columns. CSV must include pincode and sales.");
+    }
+
+    const aggregated = new Map();
+    let invalidRows = 0;
+
+    for (let i = 1; i < rows.length; i += 1) {
+      const row = rows[i];
+      const rawPincode = row[pincodeIndex] ? row[pincodeIndex].trim() : "";
+      const rawSales = row[salesIndex] ? row[salesIndex].trim() : "";
+      const sales = Number(rawSales);
+      if (!rawPincode || Number.isNaN(sales)) {
+        invalidRows += 1;
+        continue;
+      }
+
+      const existing = aggregated.get(rawPincode) || {
+        pincode: rawPincode,
+        sales: 0,
+      };
+      existing.sales += sales;
+
+      aggregated.set(rawPincode, existing);
+    }
+
+    const parsedRows = Array.from(aggregated.values());
+
+    if (parsedRows.length === 0) {
+      throw new Error("No valid rows found. Check pincode and sales values.");
+    }
+
+    setUploadedData(parsedRows);
+    setUploadMeta({
+      hasFile: true,
+      fileName,
+      validRows: parsedRows.length,
+      invalidRows,
+      usedLatLng: 0
+    });
+    setUploadError("");
+    handleClearFilters();
+  };
+
+  const handleUpload = (event) => {
+    const file = event.target.files && event.target.files[0];
+    if (!file) return;
+
+    setIsParsing(true);
+    const reader = new FileReader();
+
+    reader.onload = () => {
+      try {
+        parseCsvFile(reader.result || "", file.name);
+      } catch (error) {
+        setUploadError(error.message || "Unable to parse CSV file.");
+        setUploadedData([]);
+        setUploadMeta({
+          hasFile: true,
+          fileName: file.name,
+          validRows: 0,
+          invalidRows: 0,
+          usedLatLng: 0
+        });
+      } finally {
+        setIsParsing(false);
+        event.target.value = "";
+      }
+    };
+
+    reader.onerror = () => {
+      setUploadError("Failed to read the file. Please try again.");
+      setIsParsing(false);
+      event.target.value = "";
+    };
+
+    reader.readAsText(file);
   };
 
   if (loading) {
@@ -222,51 +492,53 @@ const PincodeMap = ({ data }) => {
 
   if (geocodedData.length === 0 && !loading) {
     return (
-      <div>
+      <div className="empty-state">
         <Map
           center={[20.5937, 78.9629]}
           zoom={5}
-          style={{ height: "90vh", width: "100%" }}
+          style={{ height: "70vh", width: "100%" }}
           maxZoom={20}
         >
           <TileLayer
-            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-            attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
+            url={TILE_LAYERS.imagery.url}
+            attribution={TILE_LAYERS.imagery.attribution}
+            maxNativeZoom={TILE_LAYERS.imagery.maxNativeZoom}
+            detectRetina
           />
         </Map>
-        <div style={{ 
-          padding: "20px", 
-          backgroundColor: "#fff3cd",
-          borderTop: "2px solid #ffc107",
-          textAlign: "center"
-        }}>
-          <strong style={{ fontSize: "18px", display: "block", marginBottom: "10px" }}>
-            No pincode data found
-          </strong>
-          <div style={{ fontSize: "14px", color: "#856404" }}>
-            Please add your pincode and sales data to <code>src/data/pincodeSales.json</code>
-            <br />
-            <br />
-            <strong>Expected format:</strong>
-            <pre style={{ 
-              display: "inline-block", 
-              textAlign: "left", 
-              backgroundColor: "#f8f9fa",
-              padding: "10px",
-              borderRadius: "4px",
-              marginTop: "10px"
-            }}>
-{`[
-  {
-    "pincode": "110001",
-    "sales": 125000
-  },
-  {
-    "pincode": "400001",
-    "sales": 98000
-  }
-]`}
-            </pre>
+        <div className="empty-card">
+          <div className="empty-title">No pincode data found</div>
+          <div className="empty-subtitle">
+            Upload a CSV or update the bundled dataset to begin.
+          </div>
+          {uploadError ? (
+            <div className="upload-status error">
+              <div>
+                <strong>{uploadMeta.fileName || "Upload error"}</strong>
+                <div className="upload-meta">{uploadError}</div>
+              </div>
+              <button className="button ghost" type="button" onClick={handleResetUpload}>
+                Clear
+              </button>
+            </div>
+          ) : null}
+          <div className="empty-actions">
+            <label className="button" htmlFor="csv-upload-empty">
+              Upload CSV
+            </label>
+            <a className="button ghost" href="/sample_pincode_sales.csv" download>
+              Download sample
+            </a>
+            <input
+              id="csv-upload-empty"
+              className="file-input"
+              type="file"
+              accept=".csv"
+              onChange={handleUpload}
+            />
+          </div>
+          <div className="empty-footnote">
+            Required columns: <strong>pincode</strong>, <strong>sales</strong>.
           </div>
         </div>
       </div>
@@ -290,9 +562,59 @@ const PincodeMap = ({ data }) => {
         </div>
         <div className="header-meta">
           <div className="meta-chip">{geocodedData.length} pincodes</div>
-          <div className="meta-chip">Updated just now</div>
+          <div className="meta-chip">
+            {uploadMeta.hasFile ? `Uploaded: ${uploadMeta.fileName}` : "Bundled dataset"}
+          </div>
         </div>
       </div>
+
+      <div className="upload-banner">
+        <div>
+          <div className="upload-title">Data source</div>
+          <div className="upload-subtitle">
+            Upload a CSV with pincode and sales only. We handle geocoding.
+          </div>
+        </div>
+        <div className="upload-actions">
+          <label className="button" htmlFor="csv-upload-main">
+            {isParsing ? "Parsing..." : "Upload CSV"}
+          </label>
+          <a className="button ghost" href="/sample_pincode_sales.csv" download>
+            Download sample
+          </a>
+          {uploadMeta.hasFile ? (
+            <button className="button ghost" type="button" onClick={handleResetUpload}>
+              Reset upload
+            </button>
+          ) : null}
+          <input
+            id="csv-upload-main"
+            className="file-input"
+            type="file"
+            accept=".csv"
+            onChange={handleUpload}
+            disabled={isParsing}
+          />
+        </div>
+      </div>
+      {uploadMeta.hasFile ? (
+        <div className={`upload-status ${uploadError ? "error" : ""}`}>
+          <div>
+            <strong>{uploadMeta.fileName}</strong>
+            <div className="upload-meta">
+              {uploadError
+                ? uploadError
+                : `${uploadMeta.validRows} valid rows` +
+                  (uploadMeta.invalidRows ? ` • ${uploadMeta.invalidRows} invalid` : "")}
+            </div>
+          </div>
+          {uploadError ? (
+            <button className="button ghost" type="button" onClick={handleResetUpload}>
+              Clear
+            </button>
+          ) : null}
+        </div>
+      ) : null}
 
       <div className="dashboard-toolbar">
         <div className="toolbar-group">
@@ -342,6 +664,14 @@ const PincodeMap = ({ data }) => {
             />
             Auto-fit view
           </label>
+          <label className="toggle">
+            <input
+              type="checkbox"
+              checked={showHeatmap}
+              onChange={(event) => setShowHeatmap(event.target.checked)}
+            />
+            Heatmap
+          </label>
           <label className="field">
             <span>Basemap</span>
             <select
@@ -371,21 +701,44 @@ const PincodeMap = ({ data }) => {
             maxZoom={20}
             whenCreated={setMapInstance}
           >
-            <TileLayer url={tileLayer.url} attribution={tileLayer.attribution} />
+            <TileLayer
+              url={tileLayer.url}
+              attribution={tileLayer.attribution}
+              maxNativeZoom={tileLayer.maxNativeZoom}
+              detectRetina
+            />
             {autoFit && displayBounds.length > 0 ? (
               <FitBounds bounds={displayBounds} />
             ) : null}
-            <PincodeCluster 
-              geocodedData={displayData}
-              getColor={getColor}
-              getRadius={getRadius}
-              formatSales={formatSales}
-              selectedPincode={selectedPincode}
-              onSelect={(item) => setSelectedPincode(item.pincode)}
-            />
+            {showHeatmap ? (
+              heatmapGroups.map((group) => (
+                <HeatmapLayer
+                  key={group.id}
+                  points={group.points}
+                  options={{
+                    radius: group.radius,
+                    blur: group.blur,
+                    maxZoom: 12,
+                    minOpacity: 0.25
+                  }}
+                />
+              ))
+            ) : (
+              <PincodeCluster 
+                geocodedData={displayData}
+                getColor={getColor}
+                getRadius={getRadius}
+                formatSales={formatSales}
+                selectedPincode={selectedPincode}
+                onSelect={(item) => setSelectedPincode(item.pincode)}
+              />
+            )}
           </Map>
           <div className="map-legend">
-            <strong>Legend:</strong> Circle size and color represent sales value (larger/darker = higher sales)
+            <strong>Legend:</strong>{" "}
+            {showHeatmap
+              ? "Heat intensity represents relative sales (hotter = higher sales)."
+              : "Circle size and color represent sales value (larger/darker = higher sales)."}
           </div>
         </div>
 
