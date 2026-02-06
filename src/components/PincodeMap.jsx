@@ -153,7 +153,6 @@ const PincodeMap = ({ data }) => {
     const loadData = async () => {
       setLoading(true);
       const geocoded = [];
-      const total = sourceData ? sourceData.length : 0;
       const geocodeTargets = sourceData
         ? sourceData.filter((item) => !item.coordinates)
         : [];
